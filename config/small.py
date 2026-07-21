@@ -9,9 +9,11 @@ n_embd = 128
 block_size = 128   
 dropout = 0.0
 bias = False
-dataset = 'kv'   
+dataset = 'kv'
+gen_params = {'k_card': 64, 'v_card': 64, 'n_pairs': 48}  # X len = 2*n_pairs+2 = 98 <= block_size
+n_val = 1000
 
-batch_size = 128         
+batch_size = 128
 gradient_accumulation_steps = 1  
 max_iters = 4000
 lr_decay_iters = 1000

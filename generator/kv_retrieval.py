@@ -45,6 +45,10 @@ class KVRetrievalGenerator(Generator):
 
         self.duplicate_keys = duplicate_keys
 
+    @property
+    def vocab_size(self) -> int:
+        return self.N_SPECIAL + self.k_card + self.v_card
+
     def _sample_one(self) -> DatasetItem:
         if isinstance(self.n_pairs, int):
             n_pairs = self.n_pairs
@@ -54,7 +58,7 @@ class KVRetrievalGenerator(Generator):
             self.k_token_ids, size=n_pairs, replace=self.duplicate_keys
         )
         values = self.rng.choice(self.v_token_ids, size=n_pairs, replace=True)
-        kv_end = 2 * self.n_pairs
+        kv_end = 2 * n_pairs
 
         seq = np.empty(
             2 * n_pairs + 2, dtype=np.int64

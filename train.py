@@ -19,15 +19,15 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 import os
 import time
 import math
-import pickle
+import random
 from contextlib import nullcontext
 
-import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from models import get_model
+from generator import get_generator
 
 # -----------------------------------------------------------------------------
 # default config values
@@ -43,8 +43,11 @@ init_from = 'scratch' # 'scratch' or 'resume'
 wandb_log = False # disabled by default
 wandb_project = 'sandbox'
 wandb_run_name = 'run' # 'run' + str(time.time())
-# data
-dataset = 'kv' # subfolder of data/ that holds train.bin, val.bin and meta.pkl
+# data — training/validation data is streamed live from a Generator (no on-disk bins)
+dataset = 'kv' # generator name; selects the task from the generator/ registry
+gen_params = {} # task hyperparams, merged over the registry defaults for `dataset`
+n_val = 1000 # size of the fixed held-out validation set
+eval_accuracy = True # also report answer exact-match accuracy during eval
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
@@ -77,6 +80,7 @@ compile = True # use PyTorch 2.0 to compile the model to be faster
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
+config['gen_params'] = gen_params # dicts are excluded by the scalar filter above; record it explicitly
 # load the chosen architecture from the models/ folder (selected via --model=<name>)
 ModelConfig, Model = get_model(model)
 # -----------------------------------------------------------------------------
@@ -114,18 +118,15 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-# poor man's data loader
-data_dir = os.path.join('data', dataset)
+# live data loader — samples straight from the generator, no on-disk bins.
+# `gen` and `val_items` are built below (needs seed_offset from the DDP setup).
 def get_batch(split):
-    # We recreate np.memmap every batch to avoid a memory leak, as per
-    # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+        items = gen.sample_train(batch_size)
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+        items = random.sample(val_items, min(batch_size, len(val_items)))
+    x_np, y_np = gen.collate(items, block_size)
+    x, y = torch.from_numpy(x_np), torch.from_numpy(y_np)
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -137,14 +138,14 @@ def get_batch(split):
 iter_num = 0
 best_val_loss = 1e9
 
-# attempt to derive vocab_size from the dataset
-meta_path = os.path.join(data_dir, 'meta.pkl')
-meta_vocab_size = None
-if os.path.exists(meta_path):
-    with open(meta_path, 'rb') as f:
-        meta = pickle.load(f)
-    meta_vocab_size = meta['vocab_size']
-    print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+# build the generator once and derive vocab_size + the held-out val set from it.
+# Offset the seed by seed_offset so DDP ranks draw different train samples. Every
+# rank calls generate_val to populate val_hashes (needed by sample_train's dedup);
+# only the master process actually evaluates val, so per-rank val divergence is moot.
+gen = get_generator(dataset, {**gen_params, 'seed': 42 + seed_offset})
+val_items = gen.generate_val(n_val)
+meta_vocab_size = gen.vocab_size
+print(f"generator '{dataset}' vocab_size = {meta_vocab_size}, held-out val size = {len(val_items)}")
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
@@ -213,12 +214,23 @@ def estimate_loss():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
+        accs = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
+            if eval_accuracy:
+                # answer exact-match: a row is correct iff every answer position
+                # (Y != -1) is predicted right. Reduces to token accuracy for
+                # single-token answers. Non-answer positions are masked out.
+                mask = Y != -1
+                pred = logits.argmax(dim=-1)
+                row_correct = ((pred == Y) | ~mask).all(dim=1)
+                accs[k] = row_correct.float().mean().item()
         out[split] = losses.mean()
+        if eval_accuracy:
+            out[f'{split}_acc'] = accs.mean()
     model.train()
     return out
 
@@ -257,15 +269,22 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        msg = f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
+        if eval_accuracy:
+            msg += f", train acc {losses['train_acc']:.4f}, val acc {losses['val_acc']:.4f}"
+        print(msg)
         if wandb_log:
-            wandb.log({
+            log = {
                 "iter": iter_num,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
-            })
+            }
+            if eval_accuracy:
+                log["train/acc"] = losses['train_acc']
+                log["val/acc"] = losses['val_acc']
+            wandb.log(log)
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
