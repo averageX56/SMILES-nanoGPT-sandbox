@@ -27,7 +27,16 @@ import importlib
 
 # name -> (module path, class name, default constructor params)
 GENERATORS = {
-    "kv": ("generator.kv_retrieval", "KVRetrievalGenerator", {}),
+    "kv_retrieval": ("generator.kv_retrieval", "KVRetrievalGenerator", {}),
+    "addition": ("generator.addition", "AdditionGenerator", {}),
+    "sorting": ("generator.sorting", "SortingGenerator", {}),
+    "indexing": ("generator.indexing", "IndexingGenerator", {}),
+    "dyck": ("generator.dyck", "DyckGenerator", {}),
+    "function_composition": (
+        "generator.function_composition",
+        "FunctionCompositionGenerator",
+        {},
+    ),
 }
 
 
