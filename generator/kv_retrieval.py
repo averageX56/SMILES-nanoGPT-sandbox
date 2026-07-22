@@ -8,7 +8,11 @@ from .base import DatasetItem, Generator
 class KVRetrievalGenerator(Generator):
     PAD_ID = 0
     QUERY_MARKER_ID = 1
-    N_SPECIAL = 2
+    SOD_ID = 2  # start of dict
+    EOD_ID = 3  # end of dict
+    BOE_ID = 4  # beginning of entry
+    EOE_ID = 5  # end of entry
+    N_SPECIAL = 6
 
     def __init__(
         self,
@@ -58,13 +62,20 @@ class KVRetrievalGenerator(Generator):
             self.k_token_ids, size=n_pairs, replace=self.duplicate_keys
         )
         values = self.rng.choice(self.v_token_ids, size=n_pairs, replace=True)
-        kv_end = 2 * n_pairs
 
-        seq = np.empty(
-            2 * n_pairs + 2, dtype=np.int64
-        )  # n pairs + query separator + query
-        seq[0:kv_end:2] = keys
-        seq[1:kv_end:2] = values
+        # Each entry: BOE key value EOE  -> 4 tokens per pair.
+        # Dict: SOD <entries> EOD.
+        # Tail: query separator + query.
+        seq = np.empty(4 * n_pairs + 2 + 2, dtype=np.int64)
+
+        seq[0] = self.SOD_ID
+        entries = seq[1 : 1 + 4 * n_pairs]
+        entries[0::4] = self.BOE_ID
+        entries[1::4] = keys
+        entries[2::4] = values
+        entries[3::4] = self.EOE_ID
+        seq[1 + 4 * n_pairs] = self.EOD_ID
+
         seq[-2] = self.QUERY_MARKER_ID
 
         qi = int(self.rng.integers(n_pairs))
