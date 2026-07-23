@@ -28,6 +28,7 @@ import importlib
 # name -> (module path, class name, default constructor params)
 GENERATORS = {
     "kv_retrieval": ("generator.kv_retrieval", "KVRetrievalGenerator", {}),
+    "kv": ("generator.kv_retrieval", "KVRetrievalGenerator", {}),  # alias used by config/*.py and README
     "addition": ("generator.addition", "AdditionGenerator", {}),
     "sorting": ("generator.sorting", "SortingGenerator", {}),
     "indexing": ("generator.indexing", "IndexingGenerator", {}),

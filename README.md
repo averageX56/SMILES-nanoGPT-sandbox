@@ -93,6 +93,13 @@ python train.py config/small.py --model=my_model
 │   ├── base.py       # абстрактный Generator, collate с маскированием ответа
 │   └── kv_retrieval.py
 ├── config/           # конфигурации обучения
+├── eval/             # оценка чекпоинтов + экспорт CSV (запуск: python eval/<script>.py, из корня репо)
+│   ├── __init__.py
+│   ├── task_eval_utils.py              # общие хелперы: загрузка чекпоинта, генератор (любая задача), accuracy
+│   ├── task_inference.py               # тестовый инференс с чекпоинта на любой задаче (флаг --dataset)
+│   ├── export_training_dynamics_csv.py  # CSV динамики обучения из --log_file
+│   ├── export_checkpoint_scores_csv.py  # CSV скоров нескольких чекпоинтов (любая задача)
+│   └── export_pdf_metrics_csv.py         # CSV метрик из Smiles_Transormers.pdf
 └── out-*             # сохранённые модели и логи обучения
 ```
 
@@ -213,6 +220,50 @@ python inference.py \
 prompt_index, prompt, sample_index, generation
 ```
 
-# 5. Ноутбуки
+---
+
+# 5. Тестовый инференс на чекпоинте (`eval/task_inference.py`)
+
+```bash
+python eval/task_inference.py --out_dir=out-small
+```
+
+| Флаг | Значение по умолчанию | Описание |
+|------|-----------------------|----------|
+| `--out_dir` | `'out-small'` | директория с чекпоинтом (`ckpt.pt`) |
+| `--dataset` | `''` | задача/генератор (как в `train.py`); пусто = та, что в чекпоинте |
+| `--gen_param_overrides` | `[]` | список словарей, каждый мёржится поверх `gen_params` чекпоинта — одна строка вывода на словарь; пусто = только обученная конфигурация |
+| `--n_eval` | `500` | сколько свежих примеров на строку |
+| `--summary_csv` / `--examples_csv` | `''` | куда сохранить сводный CSV / CSV с отдельными примерами |
+
+```bash
+# KV-retrieval — OOD-развёртка по n_pairs
+python eval/task_inference.py --out_dir=out-small \
+    --gen_param_overrides="[{'n_pairs':96},{'n_pairs':192},{'n_pairs':384}]" \
+    --summary_csv=kv_inference_summary.csv \
+    --examples_csv=kv_inference_examples.csv
+
+# другая задача, тот же скрипт — addition, OOD по числу цифр
+python eval/task_inference.py --out_dir=out-addition --dataset=addition \
+    --gen_param_overrides="[{'n_digits':10},{'n_digits':20}]"
+
+```
+
+## 5.2. Динамика обучения (`eval/export_training_dynamics_csv.py`)
+
+`train.py` теперь поддерживает необязательный `--log_file=path.jsonl`:
+по одной JSON-строке на каждый `eval_interval` (iter, train/val loss,
+train/val acc, lr, mfu; по умолчанию `''` — выключено, поведение не меняется).
+Экспортёр читает этот JSONL — или обычный текстовый лог, перехваченный через
+`tee` — и пишет по отдельному двухколоночному CSV (`iter, значение`) на
+каждую метрику:
+
+```bash
+python train.py config/small.py --log_file=out-small/train_log.jsonl
+python eval/export_training_dynamics_csv.py --log_file=out-small/train_log.jsonl \
+    --csv_out_dir=out-small/dynamics_csv
+```
+
+# 6. Ноутбуки
 
 Также в репозитории лежат ноутбуки из оригинального репозитория nanoGPT: `transformer_sizing.ipynb` и `scaling_laws.ipynb` — их можно использовать для оценки размеров модели и scaling laws.

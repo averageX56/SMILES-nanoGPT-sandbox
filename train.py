@@ -19,6 +19,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 import os
 import time
 import math
+import json
 import random
 from contextlib import nullcontext
 
@@ -39,6 +40,7 @@ eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume'
+log_file = '' # optional: path to append one JSON line per eval step (training dynamics); '' disables
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'sandbox'
@@ -110,6 +112,8 @@ print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
+    if log_file and init_from == 'scratch':
+        open(log_file, 'w').close()  # fresh run starts a fresh log; resume appends instead
 torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
@@ -285,6 +289,19 @@ while True:
                 log["train/acc"] = losses['train_acc']
                 log["val/acc"] = losses['val_acc']
             wandb.log(log)
+        if log_file:
+            entry = {
+                'iter': iter_num,
+                'train_loss': float(losses['train']),
+                'val_loss': float(losses['val']),
+                'lr': lr,
+                'mfu': running_mfu,
+            }
+            if eval_accuracy:
+                entry['train_acc'] = float(losses['train_acc'])
+                entry['val_acc'] = float(losses['val_acc'])
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(entry) + '\n')
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
